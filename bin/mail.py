@@ -6,6 +6,7 @@ from email.utils import make_msgid
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
+from email.header import decode_header
 
 from kittengroomer import FileBaseMem
 from kittengroomer import KittenGroomerMailBase
@@ -13,6 +14,8 @@ from kittengroomer import KittenGroomerMailBase
 import mimetypes
 import olefile
 import zipfile
+import officedissector
+import tarfile
 
 # Prepare application/<subtype>
 mimes_ooxml = ['vnd.openxmlformats-officedocument.']
@@ -43,7 +46,7 @@ aliases = {
 # In [12]: mimetypes.guess_type('toot.tar.gz', strict=False)
 # Out[12]: ('application/x-tar', 'gzip')
 # It works as expected if you do mimetypes.guess_type('application/gzip', strict=False)
-propertype = {'.gz': 'application/gzip'}
+propertype = {'.gz': 'application/gzip', '.tgz': 'application/gzip'}
 
 # Commonly used malicious extensions
 # Sources: http://www.howtogeek.com/137270/50-file-extensions-that-are-potentially-dangerous-on-windows/
@@ -117,7 +120,7 @@ class File(FileBaseMem):
         if expected_extensions:
             if len(self.extension) > 0 and self.extension not in expected_extensions:
                 self.log_details.update({'expected_extensions': expected_extensions})
-                self.make_dangerous()
+                # self.make_dangerous()
         else:
             # there are no known extensions associated to this mimetype.
             pass
@@ -129,6 +132,7 @@ class KittenGroomerMail(KittenGroomerMailBase):
         super(KittenGroomerMail, self).__init__(raw_email, debug)
 
         self.recursive = 0
+        self.is_archive = False
         self.max_recursive = max_recursive
 
         subtypes_apps = [
@@ -254,7 +258,28 @@ class KittenGroomerMail(KittenGroomerMailBase):
 
     def _ooxml(self):
         self.cur_attachment.add_log_details('processing_type', 'ooxml')
-        # FIXME: officedissector can't process a pseudo file, skipping for now.
+        try:
+            doc = officedissector.doc.Document(pseudofile=self.cur_attachment.file_obj,
+                                               filename=self.cur_attachment.orig_filename)
+        except Exception:
+            # Invalid file
+            self.cur_attachment.make_dangerous()
+            return
+        # There are probably other potentially malicious features:
+        # fonts, custom props, custom XML
+        if doc.is_macro_enabled or len(doc.features.macros) > 0:
+            self.cur_attachment.add_log_details('macro', True)
+            self.cur_attachment.make_dangerous()
+        if len(doc.features.embedded_controls) > 0:
+            self.cur_attachment.add_log_details('activex', True)
+            self.cur_attachment.make_dangerous()
+        if len(doc.features.embedded_objects) > 0:
+            # Exploited by CVE-2014-4114 (OLE)
+            self.cur_attachment.add_log_details('embedded_obj', True)
+            self.cur_attachment.make_dangerous()
+        if len(doc.features.embedded_packages) > 0:
+            self.cur_attachment.add_log_details('embedded_pack', True)
+            self.cur_attachment.make_dangerous()
 
     def _libreoffice(self):
         self.cur_attachment.add_log_details('processing_type', 'libreoffice')
@@ -276,10 +301,88 @@ class KittenGroomerMail(KittenGroomerMailBase):
         self.cur_attachment.add_log_details('processing_type', 'pdf')
         # FIXME: PDFiD is... difficult and can't process a pseudo file, skipping for now.
 
+    def _zip(self):
+        '''Zip processor'''
+        archive = zipfile.ZipFile(self.cur_attachment.file_obj)
+        for subfile in archive.namelist():
+            try:
+                cur_file = File(archive.open(subfile).read(), subfile)
+                self.process_payload(cur_file)
+                self.attachements.append(self.cur_attachment)
+            except Exception:
+                self.cur_attachment.make_dangerous()
+                return False
+        return True
+
+    def _lzma(self):
+        '''LZMA processor'''
+        pass
+
+    def _gzip(self):
+        '''GZip processor'''
+        pass
+
+    def _bzip(self):
+        '''BZip2 processor'''
+        pass
+
+    def _tar(self):
+        '''Tar processor'''
+        archive = tarfile.open(mode='r:*', fileobj=self.cur_attachment.file_obj)
+        for subfile in archive.getmembers():
+            try:
+                cur_file = File(archive.extractfile(subfile).read(), subfile.name)
+                self.process_payload(cur_file)
+                self.attachements.append(self.cur_attachment)
+            except Exception:
+                self.cur_attachment.make_dangerous()
+                return False
+        return True
+
     def _archive(self):
         '''Way to process Archive'''
+        # NOTE: currently only supports gzip, lzma, zip and tar
         self.cur_attachment.add_log_details('processing_type', 'archive')
-        # FIXME: We will unpack the archives later, not as simple as it seems if we want to do it in memory
+        if self.is_archive:
+            self.attachments.append(self.cur_attachment)
+            self.cur_attachment.add_log_details('recursive archive', True)
+            self.cur_attachment.make_dangerous()
+            self.is_archive = False
+            return
+        self.is_archive = True
+        original = self.cur_attachment
+        valid_unpack = False
+        # It is highly plausible that lzma, gzip and bzip are in fact also tarfiles
+        # Trying that first...
+        if 'lzma' in self.cur_attachment.mimetype:
+            try:
+                valid_unpack = self._tar()
+            except:
+                valid_unpack = self._lzma()
+        elif 'gzip' in self.cur_attachment.mimetype:
+            try:
+                valid_unpack = self._tar()
+            except:
+                valid_unpack = self._gzip()
+        elif 'bzip' in self.cur_attachment.mimetype:
+            try:
+                valid_unpack = self._tar()
+            except:
+                valid_unpack = self._bzip()
+        elif 'zip' in self.cur_attachment.mimetype:
+            valid_unpack = self._zip()
+        elif 'tar' in self.cur_attachment.mimetype:
+            valid_unpack = self._tar()
+        else:
+            self.cur_attachment.add_log_details('unsupported archive', True)
+            self.cur_attachment.make_dangerous()
+        if valid_unpack:
+            self.attachements.remove(original)
+        else:
+            self.cur_attachment = original
+            self.cur_attachment.add_log_details('Failed to unpack', True)
+            self.cur_attachment.make_dangerous()
+        self.is_archive = False
 
     def _unknown_app(self):
         '''Way to process an unknown file'''
@@ -332,13 +435,14 @@ class KittenGroomerMail(KittenGroomerMailBase):
         self.parsed_email.attach(info_msg)
         for f in attachements:
             processing_info = '{}'.format(f.log_details)
+            print(processing_info)
             processing_info_msg = MIMEText(processing_info, _subtype='plain', _charset='utf-8')
             processing_info_msg.add_header('Content-Disposition', 'attachment', filename='{}.log'.format(f.orig_filename))
             self.parsed_email.attach(processing_info_msg)
             msg = MIMEBase(f.main_type, f.sub_type)
             msg.set_payload(f.file_obj.getvalue())
             encoders.encode_base64(msg)
-            msg.add_header('Content-Disposition', 'attachment', filename=f.orig_filename)
+            msg.add_header('Content-Disposition', 'attachment', filename=f.final_filename)
             self.parsed_email.attach(msg)
 
     def split_email(self, raw_email):
@@ -348,12 +452,24 @@ class KittenGroomerMail(KittenGroomerMailBase):
         if self.parsed_email.is_multipart():
             for p in self.parsed_email.get_payload():
                 if p.get_filename():
-                    attachements.append(File(p.get_payload(decode=True), p.get_filename()))
+                    filename = decode_header(p.get_filename())
+                    if filename[0][1]:
+                        filename = filename[0][0].decode(filename[0][1])
+                    else:
+                        filename = filename[0][0]
+                    attachements.append(File(p.get_payload(decode=True), filename))
                 else:
                     to_keep.append(p)
         else:
             to_keep.append(self.parsed_email.get_payload())
         return to_keep, attachements
+
+    def process_payload(self, payload):
+        self.cur_attachment = payload
+        self.log_name.info('Processing {} ({}/{})', self.cur_attachment.orig_filename,
+                           self.cur_attachment.main_type, self.cur_attachment.sub_type)
+        if not self.cur_attachment.is_dangerous():
+            self.mime_processing_options.get(self.cur_attachment.main_type, self.unknown)()
 
     def process_mail(self, raw_email=None):
         if raw_email is None:
@@ -369,19 +485,18 @@ class KittenGroomerMail(KittenGroomerMailBase):
             self.log_name.warning('The content of the archive contains recursively other archives.')
             self.log_name.warning('This is a bad sign so the archive is not extracted to the destination key.')
         else:
-            to_keep, attachements = self.split_email(raw_email)
-            for f in attachements:
-                self.cur_attachment = f
-                self.log_name.info('Processing {} ({}/{})', self.cur_attachment.orig_filename,
-                                   self.cur_attachment.main_type, self.cur_attachment.sub_type)
-                if not self.cur_attachment.is_dangerous():
-                    pass
-            self.reassemble_mail(to_keep, attachements)
+            to_keep, self.attachements = self.split_email(raw_email)
+            for f in self.attachements:
+                self.process_payload(f)
+            self.reassemble_mail(to_keep, self.attachements)
 
 if __name__ == '__main__':
     import glob
     for f in glob.glob('/tmp/foobar/*'):
-        t = KittenGroomerMail(open(f, 'rb').read())
+        try:
+            t = KittenGroomerMail(open(f, 'rb').read())
+        except:
+            continue
         t.process_mail()
-        print(f)
-        #print(t.parsed_email.as_string())
+        # print(f)
+        # print(t.parsed_email.as_string())
