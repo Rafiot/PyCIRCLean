@@ -16,7 +16,7 @@ import olefile
 import zipfile
 import officedissector
 import tarfile
-from pdf.pdfid import PDFiD, cPDFiD
+from pdfid.pdfid import PDFiD, cPDFiD
 from io import BytesIO
 
 # Prepare application/<subtype>
