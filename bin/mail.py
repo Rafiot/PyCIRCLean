@@ -16,6 +16,8 @@ import olefile
 import zipfile
 import officedissector
 import tarfile
+from pdf.pdfid import PDFiD, cPDFiD
+from io import BytesIO
 
 # Prepare application/<subtype>
 mimes_ooxml = ['vnd.openxmlformats-officedocument.']
@@ -307,7 +309,26 @@ class KittenGroomerMail(KittenGroomerMailBase):
     def _pdf(self):
         '''Way to process PDF file'''
         self.cur_attachment.add_log_details('processing_type', 'pdf')
-        # FIXME: PDFiD is... difficult and can't process a pseudo file, skipping for now.
+        # Required to avoid having the file closed by PDFiD
+        tmp_obj = BytesIO(self.cur_attachment.file_obj.getvalue())
+        xmlDoc = PDFiD(tmp_obj)
+        oPDFiD = cPDFiD(xmlDoc, True)
+        # TODO: other keywords?
+        if oPDFiD.encrypt.count > 0:
+            self.cur_attachment.add_log_details('encrypted', True)
+            self.cur_attachment.make_dangerous()
+        if oPDFiD.js.count > 0 or oPDFiD.javascript.count > 0:
+            self.cur_attachment.add_log_details('javascript', True)
+            self.cur_attachment.make_dangerous()
+        if oPDFiD.aa.count > 0 or oPDFiD.openaction.count > 0:
+            self.cur_attachment.add_log_details('openaction', True)
+            self.cur_attachment.make_dangerous()
+        if oPDFiD.richmedia.count > 0:
+            self.cur_attachment.add_log_details('flash', True)
+            self.cur_attachment.make_dangerous()
+        if oPDFiD.launch.count > 0:
+            self.cur_attachment.add_log_details('launch', True)
+            self.cur_attachment.make_dangerous()
 
     def _zip(self):
         '''Zip processor'''
