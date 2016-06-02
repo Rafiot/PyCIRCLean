@@ -16,6 +16,10 @@ import olefile
 import zipfile
 import officedissector
 import tarfile
+import lzma
+import bz2
+import gzip
+import os
 from pdfid.pdfid import PDFiD, cPDFiD
 from io import BytesIO
 
@@ -211,7 +215,6 @@ class KittenGroomerMail(KittenGroomerMailBase):
 
     def message(self):
         '''Way to process message file'''
-        # FIXME: process this one as recursive.
         self.cur_attachment.log_string += 'Message file'
         self.recursive += 1
         self.cur_attachment = self.process_mail(self.cur_attachment)
@@ -346,14 +349,35 @@ class KittenGroomerMail(KittenGroomerMailBase):
 
     def _lzma(self):
         '''LZMA processor'''
+        try:
+            archive = lzma.decompress(self.cur_attachment.file_obj.read())
+            new_fn, ext = os.path.splitext(self.cur_attachment.orig_filename)
+            cur_file = File(archive, new_fn)
+            self.process_payload(cur_file)
+        except:
+            self.cur_attachment.make_dangerous()
         return self.cur_attachment
 
     def _gzip(self):
         '''GZip processor'''
+        try:
+            archive = gzip.decompress(self.cur_attachment.file_obj.read())
+            new_fn, ext = os.path.splitext(self.cur_attachment.orig_filename)
+            cur_file = File(archive, new_fn)
+            self.process_payload(cur_file)
+        except:
+            self.cur_attachment.make_dangerous()
         return self.cur_attachment
 
     def _bzip(self):
         '''BZip2 processor'''
+        try:
+            archive = bz2.decompress(self.cur_attachment.file_obj.read())
+            new_fn, ext = os.path.splitext(self.cur_attachment.orig_filename)
+            cur_file = File(archive, new_fn)
+            self.process_payload(cur_file)
+        except:
+            self.cur_attachment.make_dangerous()
         return self.cur_attachment
 
     def _tar(self):
@@ -529,7 +553,7 @@ class KittenGroomerMail(KittenGroomerMailBase):
 
 if __name__ == '__main__':
     import glob
-    for f in glob.glob('/tmp/ts/cur/*'):
+    for f in glob.glob('sample/*'):
         try:
             t = KittenGroomerMail(open(f, 'rb').read())
         except:
