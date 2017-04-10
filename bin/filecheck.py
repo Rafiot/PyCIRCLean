@@ -576,13 +576,13 @@ class GroomerLogger(object):
         return path_depth
 
     def _write_line_to_log(self, line, indentation_depth):
-        padding = b'   '
-        padding += b'|  ' * indentation_depth
+        padding = '   '
+        padding += '|  ' * indentation_depth
         line_bytes = os.fsencode(line)
-        with open(self.log_path, mode='ab') as lf:
+        with open(self.log_path, mode='a') as lf:
             lf.write(padding)
-            lf.write(line_bytes)
-            lf.write(b'\n')
+            lf.write(line_bytes.decode('utf-8', 'backslashreplace'))
+            lf.write('\n')
 
 
 class KittenGroomerFileCheck(KittenGroomerBase):
